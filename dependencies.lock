@@ -12,7 +12,7 @@ dependencies:
   esp-serial-flasher:
     dependencies: []
     source:
-      path: C:\Work\trmnl\firmware\components\esp-serial-flasher
+      path: /Users/wooboo/Work/trmnl-firmware/components/esp-serial-flasher
       type: local
     version: 1.11.0
   espressif/cbor:
@@ -382,7 +382,7 @@ dependencies:
       type: idf
     version: 5.5.2
   joltwallet/littlefs:
-    component_hash: 29eff7921c4e8bce021aeb7fff2723bfcafed661756de700646ea0f6223c2a32
+    component_hash: a0d01c993ff0a0ae5dad216595d225b4fa1c8577499258007af20883eb941aab
     dependencies:
     - name: idf
       require: private
@@ -390,7 +390,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 1.21.1
+    version: 1.22.0
 direct_dependencies:
 - chmorgan/esp-libhelix-mp3
 - espressif/cbor

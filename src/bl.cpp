@@ -1669,6 +1669,7 @@ static https_request_err_e downloadAndShow()
   }
 
   https_request_err_e result = handleApiDisplayResponse(apiDisplayResult.response);
+  Log_info("[BMP] downloadAndShow: status=%d filename=%s", status, apiDisplayResult.response.filename.c_str());
 
   if (!status && result == HTTPS_SUCCESS) { // this means we already have this image stored in SPIFFS
       char szTemp[36];
@@ -1691,6 +1692,18 @@ static https_request_err_e downloadAndShow()
         filesystem_file_delete(szTemp);
         Log_error_submit("Cached image is empty or unreadable: %s", szTemp);
         return HTTPS_WRONG_IMAGE_SIZE;
+      }
+      // Validate BMP before display — delete if corrupt/unsupported
+      if (content_size >= 2 && buffer[0] == 'B' && buffer[1] == 'M') {
+        bool dummy_reverse;
+        bmp_err_e bmpCheck = parseBMPHeader(buffer, dummy_reverse, display_width(), display_height(), 0);
+        if (bmpCheck != BMP_NO_ERR) {
+          Log_error_submit("Cached BMP is invalid (%d), deleting: %s", bmpCheck, szTemp);
+          filesystem_file_delete(szTemp);
+          free(buffer);
+          buffer = nullptr;
+          return HTTPS_WRONG_IMAGE_FORMAT;
+        }
       }
       Log.info("%s [%d]: Decoding image...\r\n", __FILE__, __LINE__);
       display_show_image(buffer, content_size, true);
@@ -1740,6 +1753,18 @@ static https_request_err_e downloadAndShow()
       filesystem_file_delete(szTemp);
       Log_error_submit("Modem: failed to read downloaded image from %s", szTemp);
       return HTTPS_WRONG_IMAGE_SIZE;
+    }
+
+    // Validate BMP before display — delete if corrupt/unsupported
+    if (fileSize >= 2 && buf[0] == 'B' && buf[1] == 'M') {
+      bool dummy_reverse;
+      bmp_err_e bmpCheck = parseBMPHeader(buf, dummy_reverse, display_width(), display_height(), 0);
+      if (bmpCheck != BMP_NO_ERR) {
+        Log_error_submit("Modem BMP is invalid (%d), deleting: %s", bmpCheck, szTemp);
+        filesystem_file_delete(szTemp);
+        free(buf);
+        return HTTPS_WRONG_IMAGE_FORMAT;
+      }
     }
 
     display_show_image(buf, fileSize, true);
@@ -1934,7 +1959,7 @@ static https_request_err_e downloadAndShow()
           if (counter >= 2 && buffer[0] == 'B' && buffer[1] == 'M')
           {
             isPNG = false;
-            Log.info("BMP file detected");
+            Log_info("BMP file detected, size=%d", counter);
           }
 
           submitStoredLogs();
@@ -1970,8 +1995,8 @@ static https_request_err_e downloadAndShow()
           }
           else
           {
-            bmp_res = parseBMPHeader(buffer, image_reverse);
-            Log.info("%s [%d]: BMP Parsing result: %d\r\n", __FILE__, __LINE__, bmp_res);
+            bmp_res = parseBMPHeader(buffer, image_reverse, display_width(), display_height(), 0);
+            Log_info("BMP Parsing result: %d", bmp_res);
           }
           Serial.println();
           String error = "";
@@ -2068,13 +2093,22 @@ static https_request_err_e downloadAndShow()
             break;
           }
 
+          // Handle PNG decode errors
           if (isPNG && png_res != PNG_NO_ERR)
           {
             char szTemp[36];
             fixFileName(apiDisplayResult.response.filename.c_str(), szTemp);
             filesystem_file_delete(szTemp);
-            Log_error_submit("error parsing image file - %s", error.c_str());
+            Log_error_submit("error parsing PNG file - %s", error.c_str());
+            if (buffer) { free(buffer); buffer = nullptr; }
+            return HTTPS_WRONG_IMAGE_FORMAT;
+          }
 
+          // Handle BMP parse errors
+          if (!isPNG && !isJPEG && bmp_res != BMP_NO_ERR)
+          {
+            Log_error_submit("error parsing BMP file - %s", error.c_str());
+            if (buffer) { free(buffer); buffer = nullptr; }
             return HTTPS_WRONG_IMAGE_FORMAT;
           }
         }

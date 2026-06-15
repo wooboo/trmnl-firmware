@@ -109,7 +109,7 @@ StoredLogs storedLogs(LOG_MAX_NOTES_NUMBER / 2, LOG_MAX_NOTES_NUMBER / 2, PREFER
 static https_request_err_e downloadAndShow(); // download and show the image
 static uint32_t downloadStream(WiFiClient *stream, int content_size, uint8_t *buffer);
 static https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse);
-static void getDeviceCredentials();                  // receiveing API key and Friendly ID
+static bool getDeviceCredentials();                  // receiveing API key and Friendly ID
 static bool performApiSetup();     // perform API setup call and return success
 static void downloadSetupImage();                    // download and display setup image
 static void resetDeviceCredentials(void);            // reset device credentials API key, Friendly ID, Wi-Fi SSID and password
@@ -1318,11 +1318,19 @@ void bl_init(void)
 
   Log.info("%s [%d]: Time since last sleep: %d\r\n", __FILE__, __LINE__, time_since_sleep);
 
-  if (!preferences.isKey(PREFERENCES_API_KEY) || !preferences.isKey(PREFERENCES_FRIENDLY_ID))
+  String savedApiKey = preferences.getString(PREFERENCES_API_KEY, PREFERENCES_API_KEY_DEFAULT);
+  String savedFriendlyId = preferences.getString(PREFERENCES_FRIENDLY_ID, PREFERENCES_FRIENDLY_ID_DEFAULT);
+  if (savedApiKey.isEmpty() || savedFriendlyId.isEmpty())
   {
-    Log.info("%s [%d]: API key or friendly ID not saved\r\n", __FILE__, __LINE__);
+    Log.info("%s [%d]: API key or friendly ID missing or empty\r\n", __FILE__, __LINE__);
     // lets get the api key and friendly ID
-    getDeviceCredentials();
+    if (!getDeviceCredentials())
+    {
+      preferences.putUInt(PREFERENCES_SLEEP_TIME_KEY, SLEEP_TIME_WHILE_NOT_CONNECTED);
+      display_sleep();
+      goToSleep();
+      return;
+    }
   }
   else
   {
@@ -2837,11 +2845,19 @@ static bool performApiSetup()
 
     String api_key = apiResponse.api_key;
     Log.info("%s [%d]: API key - %s\r\n", __FILE__, __LINE__, api_key.c_str());
+    String friendly_id = apiResponse.friendly_id;
+    Log.info("%s [%d]: friendly ID - %s\r\n", __FILE__, __LINE__, friendly_id.c_str());
+    if (api_key.isEmpty() || friendly_id.isEmpty())
+    {
+      Log_error_submit("/api/setup returned empty api_key or friendly_id");
+      showMessageWithLogo(API_SETUP_FAILED);
+      status = false;
+      return false;
+    }
+
     size_t res = preferences.putString(PREFERENCES_API_KEY, api_key);
     Log.info("%s [%d]: api key saved in the preferences - %d\r\n", __FILE__, __LINE__, res);
 
-    String friendly_id = apiResponse.friendly_id;
-    Log.info("%s [%d]: friendly ID - %s\r\n", __FILE__, __LINE__, friendly_id.c_str());
     res = preferences.putString(PREFERENCES_FRIENDLY_ID, friendly_id);
     Log.info("%s [%d]: friendly ID saved in the preferences - %d\r\n", __FILE__, __LINE__, res);
 
@@ -2871,6 +2887,8 @@ static bool performApiSetup()
   else
   {
     Log.info("%s [%d]: status FAIL.\r\n", __FILE__, __LINE__);
+    Log_error_submit("/api/setup returned status %d: %s", url_status, apiResponse.message.c_str());
+    showMessageWithLogo(API_SETUP_FAILED);
     status = false;
     return false;
   }
@@ -3067,7 +3085,7 @@ static void downloadSetupImage()
  * @brief Function to getting the friendly id and API key
  * @return none
  */
-static void getDeviceCredentials()
+static bool getDeviceCredentials()
 {
   bool shouldDownloadImage = performApiSetup();
 
@@ -3076,6 +3094,7 @@ static void getDeviceCredentials()
   {
     downloadSetupImage();
   }
+  return shouldDownloadImage;
 }
 
 /**

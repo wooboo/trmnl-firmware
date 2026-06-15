@@ -13,7 +13,7 @@ bmp_err_e parseBMPHeader(uint8_t *data, bool &reversed, int expectedWidth, int e
   // Check if the file is a BMP image
   if (data[0] != 'B' || data[1] != 'M')
   {
-    Log_fatal("It is not a BMP file");
+    Log_error_serial("It is not a BMP file");
     return BMP_NOT_BMP;
   }
   // Get width and height from the header
@@ -28,15 +28,15 @@ bmp_err_e parseBMPHeader(uint8_t *data, bool &reversed, int expectedWidth, int e
 
   // Validate dimensions if expected values are provided (0 = skip check)
   if (expectedWidth > 0 && (int)width != expectedWidth) {
-    Log_fatal("BMP width mismatch: got %d, expected %d", (int)width, expectedWidth);
+    Log_error_serial("BMP width mismatch: got %d, expected %d", (int)width, expectedWidth);
     return BMP_BAD_SIZE;
   }
   if (expectedHeight > 0 && (int)height != expectedHeight) {
-    Log_fatal("BMP height mismatch: got %d, expected %d", (int)height, expectedHeight);
+    Log_error_serial("BMP height mismatch: got %d, expected %d", (int)height, expectedHeight);
     return BMP_BAD_SIZE;
   }
   if (expectedBPP > 0 && (int)bitsPerPixel != expectedBPP) {
-    Log_fatal("BMP bitsPerPixel mismatch: got %d, expected %d", (int)bitsPerPixel, expectedBPP);
+    Log_error_serial("BMP bitsPerPixel mismatch: got %d, expected %d", (int)bitsPerPixel, expectedBPP);
     return BMP_BAD_SIZE;
   }
 

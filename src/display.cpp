@@ -1585,6 +1585,10 @@ PNG *png = new PNG();
 void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
 
 {
+    if (!image_buffer || data_size < 2) {
+        Log_error("%s [%d]: image buffer is too small\r\n", __FILE__, __LINE__);
+        return;
+    }
     bool isPNG = data_size >= 4 && MOTOLONG(image_buffer) == (int32_t)0x89504e47;
     auto width = display_width();
     auto height = display_height();
@@ -1667,6 +1671,10 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
 #else
             // FastEPD: handle 1-bit and 4-bit BMPs
             {
+              if (data_size < 54) {
+                Log_error("%s [%d]: BMP header is truncated\r\n", __FILE__, __LINE__);
+                return;
+              }
               uint16_t bmpBpp = image_buffer[28] | (image_buffer[29] << 8);
               if (bmpBpp == 4) {
                 // 4-bit BMP (16 grayscale) — pixel data is already in FastEPD's native nibble format.
@@ -1677,12 +1685,20 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
                                     ((int32_t)image_buffer[20] << 16) | ((int32_t)image_buffer[21] << 24);
                 int32_t bmpHeight = image_buffer[22] | (image_buffer[23] << 8) |
                                     ((int32_t)image_buffer[24] << 16) | ((int32_t)image_buffer[25] << 24);
+                bool bmpBottomUp = bmpHeight > 0;
                 if (bmpHeight < 0) bmpHeight = -bmpHeight; // top-down BMP has negative height
-                bool bmpBottomUp = (image_buffer[22] | (image_buffer[23] << 8) |
-                                    ((int32_t)image_buffer[24] << 16) | ((int32_t)image_buffer[25] << 24)) > 0;
+                if (bmpWidth <= 0 || bmpHeight <= 0 || dataOffset < 54 || dataOffset > (uint32_t)data_size) {
+                  Log_error("%s [%d]: BMP dimensions or data offset are invalid\r\n", __FILE__, __LINE__);
+                  return;
+                }
                 int srcPitch = ((bmpWidth + 1) / 2 + 3) & ~3; // BMP row stride (4-byte aligned)
                 int dstPitch = bbep.width() / 2;               // FastEPD row stride in 4BPP mode
                 int copyLen  = (bmpWidth < bbep.width()) ? (bmpWidth + 1) / 2 : dstPitch;
+                uint64_t pixelBytes = (uint64_t)srcPitch * (uint64_t)bmpHeight;
+                if (pixelBytes > (uint64_t)data_size - dataOffset) {
+                  Log_error("%s [%d]: BMP pixel data is truncated\r\n", __FILE__, __LINE__);
+                  return;
+                }
                 if (bmpWidth > bbep.width()) bmpWidth = bbep.width();
                 if (bmpHeight > bbep.height()) bmpHeight = bbep.height();
                 bbep.setMode(BB_MODE_4BPP);

@@ -109,7 +109,7 @@ StoredLogs storedLogs(LOG_MAX_NOTES_NUMBER / 2, LOG_MAX_NOTES_NUMBER / 2, PREFER
 static https_request_err_e downloadAndShow(); // download and show the image
 static uint32_t downloadStream(WiFiClient *stream, int content_size, uint8_t *buffer);
 static https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse);
-static bool getDeviceCredentials();                  // receiveing API key and Friendly ID
+static bool getDeviceCredentials();                  // receiving API key and Friendly ID
 static bool performApiSetup();     // perform API setup call and return success
 static void downloadSetupImage();                    // download and display setup image
 static void resetDeviceCredentials(void);            // reset device credentials API key, Friendly ID, Wi-Fi SSID and password
@@ -128,6 +128,8 @@ static void wifiErrorDeepSleep();
 static uint8_t *storedLogoOrDefault(int iType);
 static bool checkCurrentFileName(String &newName);
 static DeviceStatusStamp getDeviceStatusStamp();
+
+static constexpr int BMP_MIN_HEADER_SIZE = 54;
 void log_nvs_usage();
 void fixFileName(const char *src, char *dest);
 void config_gpio_for_lp();
@@ -1703,8 +1705,15 @@ static https_request_err_e downloadAndShow()
       }
       // Validate BMP before display — delete if corrupt/unsupported
       if (content_size >= 2 && buffer[0] == 'B' && buffer[1] == 'M') {
+        if (content_size < BMP_MIN_HEADER_SIZE) {
+          Log_error_submit("Cached BMP is truncated (%d bytes), deleting: %s", content_size, szTemp);
+          filesystem_file_delete(szTemp);
+          free(buffer);
+          buffer = nullptr;
+          return HTTPS_WRONG_IMAGE_FORMAT;
+        }
         bool dummy_reverse;
-        bmp_err_e bmpCheck = parseBMPHeader(buffer, dummy_reverse, display_width(), display_height(), 0);
+        bmp_err_e bmpCheck = parseBMPHeader(buffer, dummy_reverse, display_width(), display_height(), 0, content_size);
         if (bmpCheck != BMP_NO_ERR) {
           Log_error_submit("Cached BMP is invalid (%d), deleting: %s", bmpCheck, szTemp);
           filesystem_file_delete(szTemp);
@@ -1765,8 +1774,14 @@ static https_request_err_e downloadAndShow()
 
     // Validate BMP before display — delete if corrupt/unsupported
     if (fileSize >= 2 && buf[0] == 'B' && buf[1] == 'M') {
+      if (fileSize < BMP_MIN_HEADER_SIZE) {
+        Log_error_submit("Modem BMP is truncated (%d bytes), deleting: %s", fileSize, szTemp);
+        filesystem_file_delete(szTemp);
+        free(buf);
+        return HTTPS_WRONG_IMAGE_FORMAT;
+      }
       bool dummy_reverse;
-      bmp_err_e bmpCheck = parseBMPHeader(buf, dummy_reverse, display_width(), display_height(), 0);
+      bmp_err_e bmpCheck = parseBMPHeader(buf, dummy_reverse, display_width(), display_height(), 0, fileSize);
       if (bmpCheck != BMP_NO_ERR) {
         Log_error_submit("Modem BMP is invalid (%d), deleting: %s", bmpCheck, szTemp);
         filesystem_file_delete(szTemp);
@@ -1791,7 +1806,7 @@ static https_request_err_e downloadAndShow()
   }
 #endif // BOARD_TRMNL_X
 
-  bool imageBufferAllocated = false;
+  uint8_t *allocatedImageBuffer = nullptr;
   String imageUrl(filename);
   result = withHttp(
       imageUrl,
@@ -1926,7 +1941,7 @@ static https_request_err_e downloadAndShow()
               int iLen, iCount = 0;
 
               buffer = (uint8_t *)malloc(counter);
-              imageBufferAllocated = (buffer != nullptr);
+              allocatedImageBuffer = buffer;
               if (buffer) {
                 while (iCount < counter && millis() < (lStartTime + API_FIRST_RETRY*1000)) {
                   if (stream->available()) {
@@ -2006,7 +2021,11 @@ static https_request_err_e downloadAndShow()
           }
           else
           {
-            bmp_res = parseBMPHeader(buffer, image_reverse, display_width(), display_height(), 0);
+            if (content_size < BMP_MIN_HEADER_SIZE) {
+              bmp_res = BMP_BAD_SIZE;
+            } else {
+              bmp_res = parseBMPHeader(buffer, image_reverse, display_width(), display_height(), 0, content_size);
+            }
             Log_info("BMP Parsing result: %d", bmp_res);
           }
           Serial.println();
@@ -2109,7 +2128,6 @@ static https_request_err_e downloadAndShow()
             fixFileName(apiDisplayResult.response.filename.c_str(), szTemp);
             filesystem_file_delete(szTemp);
             Log_error_submit("error parsing PNG file - %s", error.c_str());
-            if (buffer) { free(buffer); buffer = nullptr; }
             return HTTPS_WRONG_IMAGE_FORMAT;
           }
 
@@ -2117,7 +2135,6 @@ static https_request_err_e downloadAndShow()
           if (!isPNG && !isJPEG && bmp_res != BMP_NO_ERR)
           {
             Log_error_submit("error parsing BMP file - %s", error.c_str());
-            if (buffer) { free(buffer); buffer = nullptr; }
             return HTTPS_WRONG_IMAGE_FORMAT;
           }
         }
@@ -2125,9 +2142,9 @@ static https_request_err_e downloadAndShow()
         return result;
       });
 
-  if (buffer && imageBufferAllocated) {
-    free(buffer);
-    imageBufferAllocated = false;
+  if (allocatedImageBuffer) {
+    free(allocatedImageBuffer);
+    allocatedImageBuffer = nullptr;
   }
   buffer = nullptr;
 

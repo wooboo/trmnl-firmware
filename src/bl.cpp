@@ -1791,8 +1791,10 @@ static https_request_err_e downloadAndShow()
   }
 #endif // BOARD_TRMNL_X
 
-  withHttp(
-      filename,
+  bool imageBufferAllocated = false;
+  String imageUrl(filename);
+  result = withHttp(
+      imageUrl,
       [&](HTTPClient *httpsp, HttpError error) -> https_request_err_e
       {
         if (error != HttpError::HTTPCLIENT_SUCCESS)
@@ -1924,6 +1926,7 @@ static https_request_err_e downloadAndShow()
               int iLen, iCount = 0;
 
               buffer = (uint8_t *)malloc(counter);
+              imageBufferAllocated = (buffer != nullptr);
               if (buffer) {
                 while (iCount < counter && millis() < (lStartTime + API_FIRST_RETRY*1000)) {
                   if (stream->available()) {
@@ -2064,8 +2067,6 @@ static https_request_err_e downloadAndShow()
             }
             Log.info("Free heap at before display - %d", ESP.getMaxAllocHeap());
             display_show_image(buffer, content_size, true);
-            free(buffer);
-            buffer = nullptr;
 
             // Using filename from API response
             new_filename = apiDisplayResult.response.filename;
@@ -2123,6 +2124,12 @@ static https_request_err_e downloadAndShow()
 
         return result;
       });
+
+  if (buffer && imageBufferAllocated) {
+    free(buffer);
+    imageBufferAllocated = false;
+  }
+  buffer = nullptr;
 
   if (result == HTTPS_UNABLE_TO_CONNECT)
   {

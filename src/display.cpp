@@ -63,6 +63,7 @@ uint8_t u8SpectraPal[512]; // RGB333 mapped to closest Spectra6 color
 #define FS LittleFS
 #include "FastEPD.h"
 FASTEPD bbep;
+static bool bCustomMatrixSet = false;
 const uint8_t u8_graytable[] = {
 /* 0 */  0, 0, 0, 0, 0, 0, 1, 1, 1, 
 /* 1 */  0, 0, 1, 1, 1, 2, 2, 1, 1, 
@@ -1751,8 +1752,11 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
     }
 #else
  {
-    int rc = bbep.setCustomMatrix(u8_graytable, sizeof(u8_graytable));
-    Log_info("%s [%d]: setCustomMatrix returned %d\r\n", __FILE__, __LINE__, rc);
+    if (!bCustomMatrixSet) {
+        int rc = bbep.setCustomMatrix(u8_graytable, sizeof(u8_graytable));
+        Log_info("%s [%d]: setCustomMatrix returned %d\r\n", __FILE__, __LINE__, rc);
+        bCustomMatrixSet = (rc == 0);
+    }
 
  //   if (bbep.getPreviousMode() != BB_MODE_NONE && (bbep.getMode() == BB_MODE_1BPP || bbep.getMode() == BB_MODE_2BPP)) {
  //       Log_info("%s [%d]: Using partial update since we have a copy of the previous image\n", __FILE__, __LINE__);

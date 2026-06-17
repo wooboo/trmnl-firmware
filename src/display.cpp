@@ -1694,7 +1694,8 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
                 int srcPitch = ((bmpWidth + 1) / 2 + 3) & ~3; // BMP row stride (4-byte aligned)
                 int dstPitch = bbep.width() / 2;               // FastEPD row stride in 4BPP mode
                 int copyLen  = (bmpWidth < bbep.width()) ? (bmpWidth + 1) / 2 : dstPitch;
-                uint64_t pixelBytes = (uint64_t)srcPitch * (uint64_t)bmpHeight;
+                int srcHeight = bmpHeight;
+                uint64_t pixelBytes = (uint64_t)srcPitch * (uint64_t)srcHeight;
                 if (pixelBytes > (uint64_t)data_size - dataOffset) {
                   Log_error("%s [%d]: BMP pixel data is truncated\r\n", __FILE__, __LINE__);
                   return;
@@ -1705,7 +1706,7 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
                 uint8_t *dst = bbep.currentBuffer();
                 const uint8_t *src = image_buffer + dataOffset;
                 for (int y = 0; y < bmpHeight; y++) {
-                  int srcY = bmpBottomUp ? (bmpHeight - 1 - y) : y;
+                  int srcY = bmpBottomUp ? (srcHeight - 1 - y) : y;
                   memcpy(dst + y * dstPitch, src + srcY * srcPitch, copyLen);
                 }
               } else {

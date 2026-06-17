@@ -1982,9 +1982,14 @@ static https_request_err_e downloadAndShow()
           //memcpy(buffer, payload.c_str(), counter);
           content_size = counter;
 
-          if (counter >= 2 && buffer[0] == 'B' && buffer[1] == 'M')
+          bool isBMP = counter >= 2 && buffer[0] == 'B' && buffer[1] == 'M';
+          if (isBMP)
           {
             isPNG = false;
+            if (content_size < BMP_MIN_HEADER_SIZE) {
+              Log_error_submit("Receiving failed; BMP header is truncated: %d bytes", content_size);
+              return HTTPS_WRONG_IMAGE_FORMAT;
+            }
             Log_info("BMP file detected, size=%d", counter);
           }
 

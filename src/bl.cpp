@@ -130,6 +130,28 @@ static bool checkCurrentFileName(String &newName);
 static DeviceStatusStamp getDeviceStatusStamp();
 
 static constexpr int BMP_MIN_HEADER_SIZE = 54;
+static https_request_err_e validateBmpBeforeDisplay(uint8_t *image, size_t imageSize, const char *path, const char *source)
+{
+  if (imageSize < 2 || image[0] != 'B' || image[1] != 'M') {
+    return HTTPS_SUCCESS;
+  }
+
+  if (imageSize < BMP_MIN_HEADER_SIZE) {
+    Log_error_submit("%s BMP is truncated (%u bytes), deleting: %s", source, static_cast<unsigned>(imageSize), path);
+    filesystem_file_delete(path);
+    return HTTPS_WRONG_IMAGE_FORMAT;
+  }
+
+  bool dummy_reverse;
+  bmp_err_e bmpCheck = parseBMPHeader(image, dummy_reverse, display_width(), display_height(), 0, imageSize);
+  if (bmpCheck != BMP_NO_ERR) {
+    Log_error_submit("%s BMP is invalid (%d), deleting: %s", source, bmpCheck, path);
+    filesystem_file_delete(path);
+    return HTTPS_WRONG_IMAGE_FORMAT;
+  }
+
+  return HTTPS_SUCCESS;
+}
 void log_nvs_usage();
 void fixFileName(const char *src, char *dest);
 void config_gpio_for_lp();
@@ -1704,23 +1726,11 @@ static https_request_err_e downloadAndShow()
         return HTTPS_WRONG_IMAGE_SIZE;
       }
       // Validate BMP before display — delete if corrupt/unsupported
-      if (content_size >= 2 && buffer[0] == 'B' && buffer[1] == 'M') {
-        if (content_size < BMP_MIN_HEADER_SIZE) {
-          Log_error_submit("Cached BMP is truncated (%d bytes), deleting: %s", content_size, szTemp);
-          filesystem_file_delete(szTemp);
-          free(buffer);
-          buffer = nullptr;
-          return HTTPS_WRONG_IMAGE_FORMAT;
-        }
-        bool dummy_reverse;
-        bmp_err_e bmpCheck = parseBMPHeader(buffer, dummy_reverse, display_width(), display_height(), 0, content_size);
-        if (bmpCheck != BMP_NO_ERR) {
-          Log_error_submit("Cached BMP is invalid (%d), deleting: %s", bmpCheck, szTemp);
-          filesystem_file_delete(szTemp);
-          free(buffer);
-          buffer = nullptr;
-          return HTTPS_WRONG_IMAGE_FORMAT;
-        }
+      https_request_err_e bmpValidation = validateBmpBeforeDisplay(buffer, content_size, szTemp, "Cached");
+      if (bmpValidation != HTTPS_SUCCESS) {
+        free(buffer);
+        buffer = nullptr;
+        return bmpValidation;
       }
       Log.info("%s [%d]: Decoding image...\r\n", __FILE__, __LINE__);
       display_show_image(buffer, content_size, true);
@@ -1765,7 +1775,7 @@ static https_request_err_e downloadAndShow()
 
     int fileSize = 0;
     uint8_t* buf = display_read_file(szTemp, &fileSize);
-    if (!buf || fileSize == 0)
+    if (!buf || fileSize <= 0)
     {
       filesystem_file_delete(szTemp);
       Log_error_submit("Modem: failed to read downloaded image from %s", szTemp);
@@ -1773,21 +1783,10 @@ static https_request_err_e downloadAndShow()
     }
 
     // Validate BMP before display — delete if corrupt/unsupported
-    if (fileSize >= 2 && buf[0] == 'B' && buf[1] == 'M' && fileSize < BMP_MIN_HEADER_SIZE) {
-      Log_error_submit("Modem BMP is truncated (%d bytes), deleting: %s", fileSize, szTemp);
-      filesystem_file_delete(szTemp);
+    https_request_err_e bmpValidation = validateBmpBeforeDisplay(buf, fileSize, szTemp, "Modem");
+    if (bmpValidation != HTTPS_SUCCESS) {
       free(buf);
-      return HTTPS_WRONG_IMAGE_FORMAT;
-    }
-    if (fileSize >= BMP_MIN_HEADER_SIZE && buf[0] == 'B' && buf[1] == 'M') {
-      bool dummy_reverse;
-      bmp_err_e bmpCheck = parseBMPHeader(buf, dummy_reverse, display_width(), display_height(), 0, fileSize);
-      if (bmpCheck != BMP_NO_ERR) {
-        Log_error_submit("Modem BMP is invalid (%d), deleting: %s", bmpCheck, szTemp);
-        filesystem_file_delete(szTemp);
-        free(buf);
-        return HTTPS_WRONG_IMAGE_FORMAT;
-      }
+      return bmpValidation;
     }
 
     display_show_image(buf, fileSize, true);

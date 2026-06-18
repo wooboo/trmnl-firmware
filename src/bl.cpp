@@ -1773,13 +1773,13 @@ static https_request_err_e downloadAndShow()
     }
 
     // Validate BMP before display — delete if corrupt/unsupported
-    if (fileSize >= 2 && buf[0] == 'B' && buf[1] == 'M') {
-      if (fileSize < BMP_MIN_HEADER_SIZE) {
-        Log_error_submit("Modem BMP is truncated (%d bytes), deleting: %s", fileSize, szTemp);
-        filesystem_file_delete(szTemp);
-        free(buf);
-        return HTTPS_WRONG_IMAGE_FORMAT;
-      }
+    if (fileSize >= 2 && buf[0] == 'B' && buf[1] == 'M' && fileSize < BMP_MIN_HEADER_SIZE) {
+      Log_error_submit("Modem BMP is truncated (%d bytes), deleting: %s", fileSize, szTemp);
+      filesystem_file_delete(szTemp);
+      free(buf);
+      return HTTPS_WRONG_IMAGE_FORMAT;
+    }
+    if (fileSize >= BMP_MIN_HEADER_SIZE && buf[0] == 'B' && buf[1] == 'M') {
       bool dummy_reverse;
       bmp_err_e bmpCheck = parseBMPHeader(buf, dummy_reverse, display_width(), display_height(), 0, fileSize);
       if (bmpCheck != BMP_NO_ERR) {

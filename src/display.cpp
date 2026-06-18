@@ -63,6 +63,7 @@ uint8_t u8SpectraPal[512]; // RGB333 mapped to closest Spectra6 color
 #define FS LittleFS
 #include "FastEPD.h"
 FASTEPD bbep;
+static bool bCustomMatrixSet = false;
 const uint8_t u8_graytable[] = {
 /* 0 */  0, 0, 0, 0, 0, 0, 1, 1, 1, 
 /* 1 */  0, 0, 1, 1, 1, 2, 2, 1, 1, 
@@ -1584,6 +1585,10 @@ PNG *png = new PNG();
 void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
 
 {
+    if (!image_buffer || data_size < 2) {
+        Log_error("%s [%d]: image buffer is too small\r\n", __FILE__, __LINE__);
+        return;
+    }
     bool isPNG = data_size >= 4 && MOTOLONG(image_buffer) == (int32_t)0x89504e47;
     auto width = display_width();
     auto height = display_height();
@@ -1597,7 +1602,6 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
 
    // Log_info("Paint_NewImage %d", reverse);
     Log_info("display_show_image start");
-    Log_info("maximum_compatibility = %d\n", apiDisplayResult.response.maximum_compatibility);
 #ifdef FUTURE
     if (reverse)
     {
@@ -1654,16 +1658,71 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
 #ifdef BOARD_TRMNL_X
             // Show charging indicator if the USB power is connected (whether actually charging or not)
             if (get_usb_status() == UsbStatus::CONNECTED) {
-                bbep.loadG5Image(battery_small, 40, bbep.height() - 120, BBEP_WHITE, BBEP_BLACK);
+                bbep.loadG5Image(battery_small, 15, bbep.height() - 50, 6, BBEP_WHITE, 0.35f);
             }
 #endif // BOARD_TRMNL_X
         }
         else
         {
          // This work-around is due to a lack of RAM; the correct method would be to use loadBMP()
-            flip_image(image_buffer+62, bbep.width(), bbep.height(), false); // fix bottom-up bitmap images
 #ifdef BB_EPAPER
+            flip_image(image_buffer+62, bbep.width(), bbep.height(), false); // fix bottom-up bitmap images
             bbep.setBuffer(image_buffer+62); // uncompressed 1-bpp bitmap
+#else
+            // FastEPD: handle 1-bit and 4-bit BMPs
+            {
+              if (data_size < 54) {
+                Log_error("%s [%d]: BMP header is truncated\r\n", __FILE__, __LINE__);
+                return;
+              }
+              uint16_t bmpBpp = image_buffer[28] | (image_buffer[29] << 8);
+              if (bmpBpp == 4) {
+                // 4-bit BMP (16 grayscale) — pixel data is already in FastEPD's native nibble format.
+                // BMP rows are bottom-up, so we flip while copying.
+                uint32_t dataOffset = image_buffer[10] | (image_buffer[11] << 8) |
+                                      ((uint32_t)image_buffer[12] << 16) | ((uint32_t)image_buffer[13] << 24);
+                int32_t bmpWidth  = image_buffer[18] | (image_buffer[19] << 8) |
+                                    ((int32_t)image_buffer[20] << 16) | ((int32_t)image_buffer[21] << 24);
+                int32_t bmpHeight = image_buffer[22] | (image_buffer[23] << 8) |
+                                    ((int32_t)image_buffer[24] << 16) | ((int32_t)image_buffer[25] << 24);
+                bool bmpBottomUp = bmpHeight > 0;
+                if (bmpHeight < 0) bmpHeight = -bmpHeight; // top-down BMP has negative height
+                if (bmpWidth <= 0 || bmpHeight <= 0 || dataOffset < 54 || dataOffset > (uint32_t)data_size) {
+                  Log_error("%s [%d]: BMP dimensions or data offset are invalid\r\n", __FILE__, __LINE__);
+                  return;
+                }
+                int srcPitch = ((bmpWidth + 1) / 2 + 3) & ~3; // BMP row stride (4-byte aligned)
+                int dstPitch = bbep.width() / 2;               // FastEPD row stride in 4BPP mode
+                int copyLen  = (bmpWidth < bbep.width()) ? (bmpWidth + 1) / 2 : dstPitch;
+                int srcHeight = bmpHeight;
+                uint64_t pixelBytes = (uint64_t)srcPitch * (uint64_t)srcHeight;
+                if (pixelBytes > (uint64_t)data_size - dataOffset) {
+                  Log_error("%s [%d]: BMP pixel data is truncated\r\n", __FILE__, __LINE__);
+                  return;
+                }
+                if (bmpWidth > bbep.width()) bmpWidth = bbep.width();
+                if (bmpHeight > bbep.height()) bmpHeight = bbep.height();
+                bbep.setMode(BB_MODE_4BPP);
+                uint8_t *dst = bbep.currentBuffer();
+                const uint8_t *src = image_buffer + dataOffset;
+                for (int y = 0; y < bmpHeight; y++) {
+                  int srcY = bmpBottomUp ? (srcHeight - 1 - y) : y;
+                  memcpy(dst + y * dstPitch, src + srcY * srcPitch, copyLen);
+                }
+              } else {
+                // 1-bit BMP — use library function
+                int rc = bbep.loadBMP(image_buffer, 0, 0, BBEP_WHITE, BBEP_BLACK);
+                if (rc != 0) {
+                  Log_error("%s [%d]: loadBMP failed with code %d\r\n", __FILE__, __LINE__, rc);
+                }
+              }
+            }
+#ifdef BOARD_TRMNL_X
+            // Show charging indicator if the USB power is connected (whether actually charging or not)
+            if (get_usb_status() == UsbStatus::CONNECTED) {
+                bbep.loadG5Image(battery_small, 15, bbep.height() - 50, 6, BBEP_WHITE, 0.35f);
+            }
+#endif // BOARD_TRMNL_X
 #endif
         }
 #ifdef BB_EPAPER
@@ -1710,8 +1769,11 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
     }
 #else
  {
-    int rc = bbep.setCustomMatrix(u8_graytable, sizeof(u8_graytable));
-    Log_info("%s [%d]: setCustomMatrix returned %d\r\n", __FILE__, __LINE__, rc);
+    if (!bCustomMatrixSet) {
+        int rc = bbep.setCustomMatrix(u8_graytable, sizeof(u8_graytable));
+        Log_info("%s [%d]: setCustomMatrix returned %d\r\n", __FILE__, __LINE__, rc);
+        bCustomMatrixSet = (rc == 0);
+    }
 
  //   if (bbep.getPreviousMode() != BB_MODE_NONE && (bbep.getMode() == BB_MODE_1BPP || bbep.getMode() == BB_MODE_2BPP)) {
  //       Log_info("%s [%d]: Using partial update since we have a copy of the previous image\n", __FILE__, __LINE__);

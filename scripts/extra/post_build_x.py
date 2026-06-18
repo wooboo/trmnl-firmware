@@ -17,7 +17,7 @@ def post_build(source, target, env):
     subprocess.run([
         "pio", "pkg", "exec", "-p", "tool-esptoolpy", "esptool.py", "--",
         "--chip", "ESP32S3",
-        "merge-bin",
+        "merge_bin",
         "-o", str(output),
         "--flash-mode", "dio",
         "--flash-freq", "80m",

@@ -187,4 +187,9 @@ void display_set_light_sleep(uint8_t enabled);
  */
 void display_sleep(void);
 
+#ifdef BOARD_M5STACK_PAPERCOLOR
+float papercolor_read_battery_voltage(void);
+void papercolor_show_native_color_card(void);
+#endif
+
 #endif

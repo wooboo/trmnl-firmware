@@ -1,3 +1,4 @@
+#if !defined(BOARD_M5STACK_PAPERCOLOR)
 #include <Arduino.h>
 #include <display.h>
 #include <power.h>
@@ -2614,3 +2615,4 @@ void display_sleep(void)
     bbep.deInit();
 #endif
 }
+#endif // !BOARD_M5STACK_PAPERCOLOR

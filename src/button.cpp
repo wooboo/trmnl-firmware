@@ -3,9 +3,17 @@
 #include <config.h>
 #include "button.h"
 
-static unsigned long wait_for_button_release(unsigned long start_time) {
-  pinMode(PIN_INTERRUPT, INPUT);
-  while (digitalRead(PIN_INTERRUPT) == LOW && millis() - start_time < BUTTON_SOFT_RESET_TIME) {
+static void configure_button_pin(uint8_t pin) {
+#ifdef BOARD_M5STACK_PAPERCOLOR
+  pinMode(pin, INPUT_PULLUP);
+#else
+  pinMode(pin, INPUT);
+#endif
+}
+
+static unsigned long wait_for_button_release(uint8_t pin, unsigned long start_time) {
+  configure_button_pin(pin);
+  while (digitalRead(pin) == LOW && millis() - start_time < BUTTON_SOFT_RESET_TIME) {
     delay(10);
   }
   return millis() - start_time;
@@ -25,13 +33,13 @@ static ButtonPressResult classify_press_duration(unsigned long duration) {
   return NoAction; 
 }
 
-static ButtonPressResult wait_for_second_press(unsigned long start_time) {
+static ButtonPressResult wait_for_second_press(uint8_t pin, unsigned long start_time) {
   auto release_time = millis();
 
   while (millis() - release_time < BUTTON_DOUBLE_CLICK_WINDOW) {
-    if (digitalRead(PIN_INTERRUPT) == LOW) {
+    if (digitalRead(pin) == LOW) {
       auto second_press_start = millis();
-      auto second_duration = wait_for_button_release(second_press_start);
+      auto second_duration = wait_for_button_release(pin, second_press_start);
 
       ButtonPressResult long_press_result = classify_press_duration(second_duration);
       if (long_press_result != NoAction) {
@@ -47,25 +55,25 @@ static ButtonPressResult wait_for_second_press(unsigned long start_time) {
   return ShortPress;
 }
 
-ButtonPressResult read_button_presses()
+ButtonPressResult read_button_presses_on_pin(uint8_t pin)
 {
   auto time_start = millis();
-  Log_info("Button time=%lu: start", time_start);
-  pinMode(PIN_INTERRUPT, INPUT);
-  if (digitalRead(PIN_INTERRUPT) == HIGH) {
+  Log_info("Button pin=%u time=%lu: start", pin, time_start);
+  configure_button_pin(pin);
+  if (digitalRead(pin) == HIGH) {
     if (time_start < 2000) {
       Log_info("Button: already released at start (GPIO wakeup), waiting for second press");
-      return wait_for_second_press(time_start);
+      return wait_for_second_press(pin, time_start);
     } else {
       Log_info("Button: waiting for button press");
-      while (digitalRead(PIN_INTERRUPT) == HIGH) {
+      while (digitalRead(pin) == HIGH) {
         delay(10);
       }
       time_start = millis();
     }
   }
 
-  auto press_duration = wait_for_button_release(time_start);
+  auto press_duration = wait_for_button_release(pin, time_start);
 
   ButtonPressResult long_press_result = classify_press_duration(press_duration);
   if (long_press_result != NoAction) {
@@ -74,14 +82,20 @@ ButtonPressResult read_button_presses()
 
   if (press_duration > 50) {
     Log_info("Button: first press detected, waiting for second press");
-    return wait_for_second_press(time_start);
+    return wait_for_second_press(pin, time_start);
   }
 
   return NoAction;
+}
+
+ButtonPressResult read_button_presses()
+{
+  return read_button_presses_on_pin(PIN_INTERRUPT);
 }
 
 const char *ButtonPressResultNames[] = {
     "LongPress",
     "DoubleClick",
     "ShortPress",
-    "SoftReset"};
+    "SoftReset",
+    "NoAction"};

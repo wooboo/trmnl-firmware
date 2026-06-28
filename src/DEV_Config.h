@@ -135,6 +135,17 @@
 #elif defined(BOARD_TRMNL_X)
 //   #define FAKE_BATTERY_VOLTAGE
 
+#elif defined(BOARD_M5STACK_PAPERCOLOR)
+   #define EPD_SCK_PIN  15
+   #define EPD_MOSI_PIN 13
+   #define EPD_MISO_PIN 14
+   #define EPD_CS_PIN   44
+   #define EPD_RST_PIN  12
+   #define EPD_DC_PIN   43
+   #define EPD_BUSY_PIN 11
+   #define PAPER_COLOR_PM1_SDA 3
+   #define PAPER_COLOR_PM1_SCL 2
+
 #elif defined(BOARD_SEEED_RETERMINAL_E1001) || defined(BOARD_SEEED_RETERMINAL_E1002)
    // Pin definition for reTerminal E1001 & E1002
    #define EPD_SCK_PIN  7

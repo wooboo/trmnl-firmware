@@ -35,6 +35,14 @@ HttpHeaderList buildDisplayHeaders(const ApiDisplayInputs &inputs)
   headers.push_back({"Temperature-Profile", "true"});
   headers.push_back({"Width", String(inputs.displayWidth)});
   headers.push_back({"Height", String(inputs.displayHeight)});
+#ifdef BOARD_M5STACK_PAPERCOLOR
+  headers.push_back({"Display-Technology", "eink-spectra6"});
+  headers.push_back({"Color-Model", "eink-spectra6"});
+  headers.push_back({"Color-Count", "6"});
+  headers.push_back({"Palette-Id", "m5papercolor-ed2208-m5gfx-v1"});
+  headers.push_back({"Dither-Location", "server"});
+  headers.push_back({"Preferred-Image-Format", "palette-bmp"});
+#endif
 
   if (inputs.specialFunction != SF_NONE)
     headers.push_back({"special_function", "true"});

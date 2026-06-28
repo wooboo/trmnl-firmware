@@ -36,6 +36,7 @@
 #include <api-client/display.h>
 #include <api-client/request_headers.h>
 #include "driver/gpio.h"
+#include "esp_sleep.h"
 #include "esp_ota_ops.h"
 #include "esp_sntp.h"
 #include "esp_flash.h"
@@ -130,11 +131,63 @@ static bool checkCurrentFileName(String &newName);
 static DeviceStatusStamp getDeviceStatusStamp();
 
 static constexpr int BMP_MIN_HEADER_SIZE = 54;
+#ifdef BOARD_M5STACK_PAPERCOLOR
+#ifndef PAPER_COLOR_DEFAULT_API_URL
+#define PAPER_COLOR_DEFAULT_API_URL "https://byos.core.zabowka.pl"
+#endif
+#endif
+
+static String apiBaseUrlFromPreferences()
+{
+#ifdef BOARD_M5STACK_PAPERCOLOR
+  return preferences.getString(PREFERENCES_API_URL, PAPER_COLOR_DEFAULT_API_URL);
+#else
+  return preferences.getString(PREFERENCES_API_URL, API_BASE_URL);
+#endif
+}
+
+static bool imageLooksLikePng(const uint8_t *image, size_t imageSize)
+{
+  return image && imageSize >= 8 &&
+         image[0] == 0x89 && image[1] == 'P' && image[2] == 'N' && image[3] == 'G' &&
+         image[4] == 0x0D && image[5] == 0x0A && image[6] == 0x1A && image[7] == 0x0A;
+}
+
+static bool imageLooksLikeJpeg(const uint8_t *image, size_t imageSize)
+{
+  return image && imageSize >= 3 && image[0] == 0xFF && image[1] == 0xD8 && image[2] == 0xFF;
+}
+
+static bool imageLooksLikeBmp(const uint8_t *image, size_t imageSize)
+{
+  return image && imageSize >= 2 && image[0] == 'B' && image[1] == 'M';
+}
+
+static const char *imagePathForFormat(const uint8_t *image, size_t imageSize, const char *bmpPath)
+{
+  if (imageLooksLikePng(image, imageSize)) {
+    return "/logo.png";
+  }
+  if (imageLooksLikeJpeg(image, imageSize)) {
+    return "/logo.jpg";
+  }
+  if (imageLooksLikeBmp(image, imageSize)) {
+    return bmpPath;
+  }
+  return nullptr;
+}
+
 static https_request_err_e validateBmpBeforeDisplay(uint8_t *image, size_t imageSize, const char *path, const char *source)
 {
   if (imageSize < 2 || image[0] != 'B' || image[1] != 'M') {
     return HTTPS_SUCCESS;
   }
+
+#ifdef BOARD_M5STACK_PAPERCOLOR
+  // PaperColor accepts full-color BMP through M5GFX; the legacy parser only
+  // validates 1/2-bpp TRMNL-style BMP payloads.
+  return HTTPS_SUCCESS;
+#endif
 
   if (imageSize < BMP_MIN_HEADER_SIZE) {
     Log_error_submit("%s BMP is truncated (%u bytes), deleting: %s", source, static_cast<unsigned>(imageSize), path);
@@ -179,6 +232,321 @@ void wait_for_serial() {
   Log_info("## Waited for serial.. %d ms", idx * 100);
 #endif
 }
+
+#ifdef BOARD_M5STACK_PAPERCOLOR
+enum PaperColorButtonAction {
+  PAPER_COLOR_BUTTON_NONE,
+  PAPER_COLOR_BUTTON_PREV,
+  PAPER_COLOR_BUTTON_NEXT,
+  PAPER_COLOR_BUTTON_REFRESH,
+  PAPER_COLOR_BUTTON_COLOR_DIAGNOSTIC
+};
+
+static PaperColorButtonAction papercolor_button_action = PAPER_COLOR_BUTTON_NONE;
+static int papercolor_wakeup_button_pin = -1;
+static constexpr uint64_t PAPER_COLOR_BUTTON_WAKE_MASK =
+    (1ULL << PAPER_COLOR_BUTTON_A_PIN) |
+    (1ULL << PAPER_COLOR_BUTTON_B_PIN) |
+    (1ULL << PAPER_COLOR_BUTTON_C_PIN);
+
+static void papercolor_configure_button_pins()
+{
+  pinMode(PAPER_COLOR_BUTTON_A_PIN, INPUT_PULLUP);
+  pinMode(PAPER_COLOR_BUTTON_B_PIN, INPUT_PULLUP);
+  pinMode(PAPER_COLOR_BUTTON_C_PIN, INPUT_PULLUP);
+}
+
+static const char *papercolor_button_name(int pin)
+{
+  switch (pin)
+  {
+  case PAPER_COLOR_BUTTON_A_PIN:
+    return "A";
+  case PAPER_COLOR_BUTTON_B_PIN:
+    return "B";
+  case PAPER_COLOR_BUTTON_C_PIN:
+    return "C";
+  default:
+    return "unknown";
+  }
+}
+
+static int papercolor_detect_wakeup_button_pin()
+{
+  papercolor_configure_button_pins();
+
+  uint64_t wake_mask = esp_sleep_get_ext1_wakeup_status();
+
+  if (wake_mask & (1ULL << PAPER_COLOR_BUTTON_A_PIN))
+    return PAPER_COLOR_BUTTON_A_PIN;
+  if (wake_mask & (1ULL << PAPER_COLOR_BUTTON_B_PIN))
+    return PAPER_COLOR_BUTTON_B_PIN;
+  if (wake_mask & (1ULL << PAPER_COLOR_BUTTON_C_PIN))
+    return PAPER_COLOR_BUTTON_C_PIN;
+
+  if (digitalRead(PAPER_COLOR_BUTTON_A_PIN) == LOW)
+    return PAPER_COLOR_BUTTON_A_PIN;
+  if (digitalRead(PAPER_COLOR_BUTTON_B_PIN) == LOW)
+    return PAPER_COLOR_BUTTON_B_PIN;
+  if (digitalRead(PAPER_COLOR_BUTTON_C_PIN) == LOW)
+    return PAPER_COLOR_BUTTON_C_PIN;
+
+  return PIN_INTERRUPT;
+}
+
+static bool papercolor_color_diagnostic_combo_held()
+{
+  papercolor_configure_button_pins();
+  return digitalRead(PAPER_COLOR_BUTTON_A_PIN) == LOW &&
+         digitalRead(PAPER_COLOR_BUTTON_C_PIN) == LOW;
+}
+
+static PaperColorButtonAction papercolor_action_for_short_press(int pin)
+{
+  switch (pin)
+  {
+  case PAPER_COLOR_BUTTON_A_PIN:
+    return PAPER_COLOR_BUTTON_NEXT;
+  case PAPER_COLOR_BUTTON_C_PIN:
+    return PAPER_COLOR_BUTTON_COLOR_DIAGNOSTIC;
+  case PAPER_COLOR_BUTTON_B_PIN:
+    return PAPER_COLOR_BUTTON_REFRESH;
+  default:
+    return PAPER_COLOR_BUTTON_NONE;
+  }
+}
+
+static bool papercolor_try_esp_wifi_saved_station()
+{
+  Log_info("PaperColor: no WifiCaptive credentials; trying ESP saved STA config");
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.setMinSecurity(WIFI_AUTH_OPEN);
+
+  wl_status_t begin_result = WiFi.begin();
+  Log_info("PaperColor: WiFi.begin() with saved STA config returned %s", wifiStatusStr(begin_result));
+
+  unsigned long start = millis();
+  while (millis() - start < 15000)
+  {
+    wl_status_t status = WiFi.status();
+    if (status == WL_CONNECTED)
+    {
+      Log_info("PaperColor: connected using ESP saved STA config");
+      return true;
+    }
+    delay(250);
+  }
+
+  Log_info("PaperColor: ESP saved STA config did not connect, status=%s", wifiStatusStr(WiFi.status()));
+  WiFi.disconnect();
+  return false;
+}
+
+static String papercolor_cache_prefix(const String &path)
+{
+  int underscore = path.indexOf('_');
+  if (underscore >= 0)
+  {
+    return path.substring(0, underscore + 1);
+  }
+
+  return path.substring(0, min(static_cast<unsigned int>(path.length()), 14U));
+}
+
+static void papercolor_update_playlist_order(const char *new_path, const char *prev_path)
+{
+  String order = preferences.getString(PREFERENCES_PLAYLIST_ORDER_KEY, "");
+  String newStr = String(new_path);
+  String prefix = papercolor_cache_prefix(newStr);
+  String prevStr = String(prev_path);
+
+  if (order.isEmpty())
+  {
+    if (!prevStr.isEmpty() && prevStr != newStr && filesystem_file_exists(prevStr.c_str()))
+    {
+      preferences.putString(PREFERENCES_PLAYLIST_ORDER_KEY, prevStr + "|" + newStr);
+    }
+    else
+    {
+      preferences.putString(PREFERENCES_PLAYLIST_ORDER_KEY, newStr);
+    }
+    return;
+  }
+
+  bool found = false;
+  String result = "";
+  int start = 0;
+  while (start <= (int)order.length())
+  {
+    int sep = order.indexOf('|', start);
+    String entry = (sep < 0) ? order.substring(start) : order.substring(start, sep);
+    if (!entry.isEmpty())
+    {
+      if (!found && entry.startsWith(prefix))
+      {
+        result += (result.isEmpty() ? "" : "|") + newStr;
+        found = true;
+      }
+      else if (entry == prevStr || filesystem_file_exists(entry.c_str()))
+      {
+        result += (result.isEmpty() ? "" : "|") + entry;
+      }
+    }
+    if (sep < 0)
+      break;
+    start = sep + 1;
+  }
+  if (found)
+  {
+    preferences.putString(PREFERENCES_PLAYLIST_ORDER_KEY, result);
+    return;
+  }
+
+  String result2 = "";
+  bool inserted = false;
+  start = 0;
+  while (start <= (int)result.length())
+  {
+    int sep = result.indexOf('|', start);
+    String entry = (sep < 0) ? result.substring(start) : result.substring(start, sep);
+    if (!entry.isEmpty())
+    {
+      result2 += (result2.isEmpty() ? "" : "|") + entry;
+      if (!inserted && entry == prevStr)
+      {
+        result2 += "|" + newStr;
+        inserted = true;
+      }
+    }
+    if (sep < 0)
+      break;
+    start = sep + 1;
+  }
+  if (!inserted)
+    result2 += (result2.isEmpty() ? "" : "|") + newStr;
+  preferences.putString(PREFERENCES_PLAYLIST_ORDER_KEY, result2);
+}
+
+static bool papercolor_show_cached_image_by_offset(int offset)
+{
+  String order = preferences.getString(PREFERENCES_PLAYLIST_ORDER_KEY, "");
+
+  if (order.isEmpty())
+  {
+    String path = (offset > 0)
+                      ? preferences.getString(PREFERENCES_CURRENT_PATH_KEY, "")
+                      : preferences.getString(PREFERENCES_LAST_PATH_KEY, "");
+    if (path.isEmpty())
+    {
+      Log_info("PaperColor button browse: no cached image");
+      return false;
+    }
+
+    int file_size = 0;
+    buffer = display_read_file(path.c_str(), &file_size);
+    if (!buffer || file_size <= 0)
+    {
+      Log_info("PaperColor button browse: failed to read %s", path.c_str());
+      return false;
+    }
+
+    preferences.putString(PREFERENCES_BROWSE_PATH_KEY, path);
+    bUsedCachedImage = true;
+    display_show_image(buffer, file_size, false);
+    free(buffer);
+    buffer = nullptr;
+    goToSleep();
+    return true;
+  }
+
+  char images[MAX_CACHED_IMAGES][36];
+  int count = 0;
+  int start = 0;
+  while (start <= (int)order.length() && count < MAX_CACHED_IMAGES)
+  {
+    int sep = order.indexOf('|', start);
+    String entry = (sep < 0) ? order.substring(start) : order.substring(start, sep);
+    if (!entry.isEmpty() && filesystem_file_exists(entry.c_str()))
+    {
+      strncpy(images[count], entry.c_str(), 35);
+      images[count][35] = '\0';
+      count++;
+    }
+    if (sep < 0)
+      break;
+    start = sep + 1;
+  }
+
+  if (count == 0)
+  {
+    Log_info("PaperColor button browse: no cached images available");
+    return false;
+  }
+
+  String browsePath = preferences.getString(PREFERENCES_BROWSE_PATH_KEY, "");
+  if (browsePath.isEmpty())
+  {
+    String lp = preferences.getString(PREFERENCES_LAST_PATH_KEY, "");
+    browsePath = lp.isEmpty() ? preferences.getString(PREFERENCES_CURRENT_PATH_KEY, "") : lp;
+  }
+
+  int cur_idx = count - 1;
+  for (int i = 0; i < count; i++)
+  {
+    if (browsePath == String(images[i]))
+    {
+      cur_idx = i;
+      break;
+    }
+  }
+
+  int new_idx = (cur_idx + offset + count) % count;
+  Log_info("PaperColor button browse: %d/%d -> %d (%s)", cur_idx, count, new_idx, images[new_idx]);
+
+  int file_size = 0;
+  buffer = display_read_file(images[new_idx], &file_size);
+  if (!buffer || file_size <= 0)
+  {
+    Log_info("PaperColor button browse: failed to read %s", images[new_idx]);
+    return false;
+  }
+
+  preferences.putString(PREFERENCES_BROWSE_PATH_KEY, String(images[new_idx]));
+  bUsedCachedImage = true;
+  display_show_image(buffer, file_size, false);
+  free(buffer);
+  buffer = nullptr;
+  goToSleep();
+  return true;
+}
+
+static void papercolor_handle_button_browse()
+{
+  switch (papercolor_button_action)
+  {
+  case PAPER_COLOR_BUTTON_PREV:
+    Log_info("PaperColor previous cached image");
+    papercolor_show_cached_image_by_offset(-1);
+    break;
+  case PAPER_COLOR_BUTTON_NEXT:
+    Log_info("PaperColor Button A short press -> next cached image");
+    papercolor_show_cached_image_by_offset(+1);
+    break;
+  case PAPER_COLOR_BUTTON_REFRESH:
+    Log_info("PaperColor Button B short press -> server refresh");
+    break;
+  case PAPER_COLOR_BUTTON_COLOR_DIAGNOSTIC:
+    Log_info("PaperColor Button C/GPIO1 -> native color diagnostic card");
+    papercolor_show_native_color_card();
+    goToSleep();
+    break;
+  default:
+    break;
+  }
+}
+#endif // BOARD_M5STACK_PAPERCOLOR
+
 #ifdef BOARD_TRMNL_X
 #include <qa.h> // For device turn off feature
 // ############################ WAKEUP STUB #############################
@@ -885,7 +1253,22 @@ void bl_init(void)
   if (gpio_wakeup)
   {
     Log_info("GPIO wakeup detected (%d)", wakeup_reason);
+#ifdef BOARD_M5STACK_PAPERCOLOR
+    papercolor_wakeup_button_pin = papercolor_detect_wakeup_button_pin();
+    Log_info("PaperColor wake button: %s (GPIO%d)", papercolor_button_name(papercolor_wakeup_button_pin), papercolor_wakeup_button_pin);
+    ButtonPressResult button = NoAction;
+    if (papercolor_color_diagnostic_combo_held())
+    {
+      Log_info("PaperColor color diagnostic combo detected");
+      papercolor_button_action = PAPER_COLOR_BUTTON_COLOR_DIAGNOSTIC;
+    }
+    else
+    {
+      button = read_button_presses_on_pin((uint8_t)papercolor_wakeup_button_pin);
+    }
+#else
     auto button = read_button_presses();
+#endif
     wait_for_serial();
     Log_info("GPIO wakeup (%d) -> button was read (%s)", wakeup_reason, ButtonPressResultNames[button]);
     switch (button)
@@ -898,6 +1281,11 @@ void bl_init(void)
       double_click = true;
       break;
     case ShortPress:
+#ifdef BOARD_M5STACK_PAPERCOLOR
+      if (papercolor_button_action == PAPER_COLOR_BUTTON_NONE)
+        papercolor_button_action = papercolor_action_for_short_press(papercolor_wakeup_button_pin);
+#endif
+      break;
     case NoAction:
       break;
     case SoftReset:
@@ -1020,6 +1408,9 @@ void bl_init(void)
 
   // Mount SPIFFS
   filesystem_init();
+#ifdef BOARD_M5STACK_PAPERCOLOR
+  papercolor_handle_button_browse();
+#endif
 #endif // !BOARD_TRMNL_X
 
 // #ifdef BOARD_TRMNL_X
@@ -1070,7 +1461,9 @@ void bl_init(void)
       showMessageWithLogo(NONE);
     }
 #else 
+#ifndef BOARD_M5STACK_PAPERCOLOR
     display_show_image(storedLogoOrDefault(1), DEFAULT_IMAGE_SIZE, false);
+#endif
 #endif // BOARD_TRMNL_X
     // Force the display to show the current playlist image after the loading screen
     // (even if it hasn't changed)
@@ -1270,6 +1663,18 @@ void bl_init(void)
     // WiFi credentials are not saved - start captive portal
     Log.info("%s [%d]: WiFi NOT saved\r\n", __FILE__, __LINE__);
 
+#ifdef BOARD_M5STACK_PAPERCOLOR
+    bool papercolor_saved_sta_connected = papercolor_try_esp_wifi_saved_station();
+    if (papercolor_saved_sta_connected)
+    {
+      String ip = String(WiFi.localIP());
+      Log_info("PaperColor: recovered WiFi connection from ESP saved STA config: %s", ip.c_str());
+      preferences.putInt(PREFERENCES_CONNECT_WIFI_RETRY_COUNT, 1);
+    }
+    else
+    {
+#endif
+
     Log_info("FW version %s", FW_VERSION_STRING);
 
     showMessageWithLogo(WIFI_CONNECT, "", false, FW_VERSION_STRING, "");
@@ -1324,6 +1729,10 @@ void bl_init(void)
     }
     Log.info("%s [%d]: WiFi connected\r\n", __FILE__, __LINE__);
     preferences.putInt(PREFERENCES_CONNECT_WIFI_RETRY_COUNT, 1);
+
+#ifdef BOARD_M5STACK_PAPERCOLOR
+    }
+#endif
   }
 
 #endif
@@ -1556,7 +1965,7 @@ ApiDisplayInputs loadApiDisplayInputs(Preferences &preferences)
 {
   ApiDisplayInputs inputs;
 
-  inputs.baseUrl = preferences.getString(PREFERENCES_API_URL, API_BASE_URL);
+  inputs.baseUrl = apiBaseUrlFromPreferences();
 
   Log.info("%s [%d]: baseUrl from preferences: %s\r\n", __FILE__, __LINE__, inputs.baseUrl.c_str());
 
@@ -1806,6 +2215,10 @@ static https_request_err_e downloadAndShow()
 #endif // BOARD_TRMNL_X
 
   uint8_t *allocatedImageBuffer = nullptr;
+#ifdef BOARD_M5STACK_PAPERCOLOR
+  bool papercolorDisplayAfterHttp = false;
+  int papercolorDisplayAfterHttpSize = 0;
+#endif
   String imageUrl(filename);
   result = withHttp(
       imageUrl,
@@ -1934,26 +2347,22 @@ static https_request_err_e downloadAndShow()
             buffer = (uint8_t *)payload.c_str();
           } else {
             Log.info("%s [%d]: Downloading image with WifiClient (stream)\r\n", __FILE__, __LINE__);
-            counter = https.getSize();
-            if (counter && counter <= MAX_IMAGE_SIZE) {
+            int expectedSize = https.getSize();
+            counter = expectedSize;
+            if (expectedSize > 0 && expectedSize <= MAX_IMAGE_SIZE) {
               WiFiClient *stream = https.getStreamPtr();
-              int iLen, iCount = 0;
 
-              buffer = (uint8_t *)malloc(counter);
+#if defined(BOARD_M5STACK_PAPERCOLOR) && defined(CONFIG_SPIRAM)
+              buffer = (uint8_t *)ps_malloc(expectedSize);
+#else
+              buffer = (uint8_t *)malloc(expectedSize);
+#endif
               allocatedImageBuffer = buffer;
               if (buffer) {
-                while (iCount < counter && millis() < (lStartTime + API_FIRST_RETRY*1000)) {
-                  if (stream->available()) {
-                    buffer[iCount++] = stream->read();
-                    lStartTime = millis(); // reset start time
-                  } else { // 15 seconds with no activity => stop trying
-                    vTaskDelay(1); // yield to allow time for the data to arrive
-                  }
-                }
+                counter = downloadStream(stream, expectedSize, buffer);
               } // if buffer
-              stream->stop(); // Important! If you don't do this, WiFi will have a memory exception later
-              if (millis() > (lStartTime + API_FIRST_RETRY*1000)) { // we timed out
-                  Log_error_submit("Receiving failed; download timed out. Image size = %d", counter);
+              if (counter != static_cast<uint32_t>(expectedSize)) {
+                  Log_error_submit("Receiving failed; expected %d bytes, got %d", expectedSize, counter);
                   return HTTPS_TIMED_OUT;
               }
             }
@@ -1980,8 +2389,17 @@ static https_request_err_e downloadAndShow()
 
           //memcpy(buffer, payload.c_str(), counter);
           content_size = counter;
+          png_res = PNG_DECODE_ERR;
+          bmp_res = BMP_NOT_BMP;
 
-          bool isBMP = counter >= 2 && buffer[0] == 'B' && buffer[1] == 'M';
+          if (!isPNG) {
+            isPNG = imageLooksLikePng(buffer, content_size);
+          }
+          if (!isJPEG) {
+            isJPEG = imageLooksLikeJpeg(buffer, content_size);
+          }
+
+          bool isBMP = imageLooksLikeBmp(buffer, content_size);
           if (isBMP)
           {
             isPNG = false;
@@ -2006,7 +2424,12 @@ static https_request_err_e downloadAndShow()
             filesystem_purge_old_file(szTemp); // try to delete the old version or older than 24h
             writeImageToFile(szTemp, buffer, content_size);
             Log.info("%s [%d]: Decoding %s\r\n", __FILE__, __LINE__, (isPNG) ? "png" : "jpeg");
+#ifdef BOARD_M5STACK_PAPERCOLOR
+            papercolorDisplayAfterHttp = true;
+            papercolorDisplayAfterHttpSize = content_size;
+#else
             display_show_image(buffer, content_size, true);
+#endif
 //            if (payload.length() != content_size) { // we allocated this buffer
 //                Log.info("%s [%d]: Freeing the image payload we allocated\r\n", __FILE__, __LINE__, szTemp);
 //                free(buffer);
@@ -2021,15 +2444,22 @@ static https_request_err_e downloadAndShow()
             #ifdef BOARD_TRMNL_X
             update_playlist_order(szTemp, _curPath.c_str());
             #endif
+            #ifdef BOARD_M5STACK_PAPERCOLOR
+            papercolor_update_playlist_order(szTemp, _curPath.c_str());
+            #endif
             preferences.putString(PREFERENCES_BROWSE_PATH_KEY, String(szTemp));
           }
           else
           {
+#ifdef BOARD_M5STACK_PAPERCOLOR
+            bmp_res = isBMP ? BMP_NO_ERR : BMP_NOT_BMP;
+#else
             if (content_size < BMP_MIN_HEADER_SIZE) {
               bmp_res = BMP_BAD_SIZE;
             } else {
               bmp_res = parseBMPHeader(buffer, image_reverse, display_width(), display_height(), 0, content_size);
             }
+#endif
             Log_info("BMP Parsing result: %d", bmp_res);
           }
           Serial.println();
@@ -2084,18 +2514,40 @@ static https_request_err_e downloadAndShow()
           {
           case BMP_NO_ERR:
           {
+#ifdef BOARD_M5STACK_PAPERCOLOR
+            char szTemp[36];
+            fixFileName(apiDisplayResult.response.filename.c_str(), szTemp);
+            filesystem_purge_old_file(szTemp);
+            writeImageToFile(szTemp, buffer, content_size);
+#else
             if (!filesystem_file_exists("/current.png"))
             {
               writeImageToFile("/current.bmp", buffer, content_size);
             }
+#endif
             Log.info("Free heap at before display - %d", ESP.getMaxAllocHeap());
+#ifdef BOARD_M5STACK_PAPERCOLOR
+            papercolorDisplayAfterHttp = true;
+            papercolorDisplayAfterHttpSize = content_size;
+#else
             display_show_image(buffer, content_size, true);
+#endif
 
             // Using filename from API response
             new_filename = apiDisplayResult.response.filename;
 
             // Print the extracted string
             Log.info("%s [%d]: New filename - %s\r\n", __FILE__, __LINE__, new_filename.c_str());
+
+#ifdef BOARD_M5STACK_PAPERCOLOR
+            String _curPath = preferences.getString(PREFERENCES_CURRENT_PATH_KEY, "");
+            String _lastPath = preferences.getString(PREFERENCES_LAST_PATH_KEY, "");
+            if (!_curPath.isEmpty() && (_curPath != String(szTemp) || _lastPath.isEmpty()))
+              preferences.putString(PREFERENCES_LAST_PATH_KEY, _curPath);
+            preferences.putString(PREFERENCES_CURRENT_PATH_KEY, String(szTemp));
+            papercolor_update_playlist_order(szTemp, _curPath.c_str());
+            preferences.putString(PREFERENCES_BROWSE_PATH_KEY, String(szTemp));
+#endif
 
             if (result != HTTPS_PLUGIN_NOT_ATTACHED)
               result = HTTPS_SUCCESS;
@@ -2145,6 +2597,12 @@ static https_request_err_e downloadAndShow()
 
         return result;
       });
+
+#ifdef BOARD_M5STACK_PAPERCOLOR
+  if (papercolorDisplayAfterHttp && allocatedImageBuffer && papercolorDisplayAfterHttpSize > 0) {
+    display_show_image(allocatedImageBuffer, papercolorDisplayAfterHttpSize, true);
+  }
+#endif
 
   if (allocatedImageBuffer) {
     free(allocatedImageBuffer);
@@ -2232,12 +2690,18 @@ https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse)
 
       if (update_firmware)
       {
+#ifdef BOARD_M5STACK_PAPERCOLOR
+        Log_info("Ignoring generic OTA update for M5Stack PaperColor");
+        update_firmware = false;
+        firmware_url = "";
+#else
         Log.info("%s [%d]: update firmware. Check URL\r\n", __FILE__, __LINE__);
         if (firmware_url.length() == 0)
         {
           Log.error("%s [%d]: Empty URL\r\n", __FILE__, __LINE__);
           update_firmware = false;
         }
+#endif
       }
       if (image_url.length() > 0)
       {
@@ -2293,7 +2757,14 @@ https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse)
 
           // Print the extracted string
           Log.info("%s [%d]: New filename - %s\r\n", __FILE__, __LINE__, new_filename.c_str());
-          if (!checkCurrentFileName(new_filename))
+          bool image_cached = checkCurrentFileName(new_filename);
+#ifdef BOARD_M5STACK_PAPERCOLOR
+          if (image_cached)
+          {
+            apiResponse.filename = new_filename;
+          }
+#endif
+          if (!image_cached)
           {
             Log.info("%s [%d]: New image. Download and show it.\r\n", __FILE__, __LINE__);
             status = true;
@@ -2553,9 +3024,15 @@ https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse)
           if (last_dot_file == "/last.bmp")
           {
             Log.info("Rewind BMP\n\r");
+#ifdef BOARD_M5STACK_PAPERCOLOR
+            buffer = display_read_file(last_dot_file.c_str(), &file_size);
+            file_check_bmp = buffer != nullptr;
+            bmp_proccess_response = file_check_bmp ? BMP_NO_ERR : BMP_BAD_SIZE;
+#else
             buffer = (uint8_t *)malloc(DISPLAY_BMP_IMAGE_SIZE);
             file_check_bmp = filesystem_read_from_file(last_dot_file.c_str(), buffer, DISPLAY_BMP_IMAGE_SIZE);
             bmp_proccess_response = parseBMPHeader(buffer, image_reverse);
+#endif
           }
           else if (last_dot_file == "/last.png")
           {
@@ -2585,7 +3062,11 @@ https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse)
             case BMP_NO_ERR:
             {
               Log.info("Showing image\n\r");
+#ifdef BOARD_M5STACK_PAPERCOLOR
+              display_show_image(buffer, file_size, true);
+#else
               display_show_image(buffer, DISPLAY_BMP_IMAGE_SIZE, true);
+#endif
               need_to_refresh_display = 1;
             }
             break;
@@ -2635,7 +3116,16 @@ https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse)
           if (filesystem_file_exists("/current.bmp"))
           {
             Log.info("%s [%d]: send_to_me BMP\r\n", __FILE__, __LINE__);
+#ifdef BOARD_M5STACK_PAPERCOLOR
+            buffer = display_read_file("/current.bmp", &file_size);
+            if (!buffer)
+            {
+              Log_error_submit("Error reading image!");
+              return HTTPS_WRONG_IMAGE_FORMAT;
+            }
+#else
             buffer = (uint8_t *)malloc(DISPLAY_BMP_IMAGE_SIZE);
+            file_size = DISPLAY_BMP_IMAGE_SIZE;
 
             if (!filesystem_read_from_file("/current.bmp", buffer, DISPLAY_BMP_IMAGE_SIZE))
             {
@@ -2653,6 +3143,7 @@ https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse)
               Log_error_submit("Error parsing BMP header, code: %d", bmp_parse_result);
               return HTTPS_WRONG_IMAGE_FORMAT;
             }
+#endif
           }
           else if (filesystem_file_exists("/current.png"))
           {
@@ -2794,7 +3285,7 @@ static bool performApiSetup()
 {
   // Set up the API inputs
   ApiSetupInputs inputs;
-  inputs.baseUrl = preferences.getString(PREFERENCES_API_URL, API_BASE_URL);
+  inputs.baseUrl = apiBaseUrlFromPreferences();
   inputs.macAddress = device_mac_address();
   inputs.firmwareVersion = FW_VERSION_STRING;
   inputs.model = String(DEVICE_MODEL);
@@ -3047,6 +3538,36 @@ static void downloadSetupImage()
     }
 #endif
 
+#ifdef BOARD_M5STACK_PAPERCOLOR
+    const char *setupImagePath = imagePathForFormat(buffer, counter, "/logo.bmp");
+    if (counter > 0 && counter <= MAX_IMAGE_SIZE && setupImagePath)
+    {
+      Log.info("%s [%d]: Received PaperColor setup logo (%d bytes) -> %s\r\n", __FILE__, __LINE__, counter, setupImagePath);
+      writeImageToFile(setupImagePath, buffer, counter);
+      free(buffer);
+      buffer = nullptr;
+
+      String friendly_id = preferences.getString(PREFERENCES_FRIENDLY_ID, PREFERENCES_FRIENDLY_ID_DEFAULT);
+      display_show_msg(storedLogoOrDefault(0), FRIENDLY_ID, friendly_id, true, "", String(message_buffer));
+      need_to_refresh_display = 0;
+    }
+    else
+    {
+      if (buffer) {
+        free(buffer);
+        buffer = nullptr;
+      }
+      if (WiFi.RSSI() > WIFI_CONNECTION_RSSI)
+      {
+        showMessageWithLogo(API_SIZE_ERROR);
+      }
+      else
+      {
+        showMessageWithLogo(WIFI_WEAK);
+      }
+      Log_error_submit("Setup image: unsupported PaperColor format or size. Read: %d", counter);
+    }
+#else
     if (counter == DISPLAY_BMP_IMAGE_SIZE)
     {
       Log.info("%s [%d]: Received successfully\r\n", __FILE__, __LINE__);
@@ -3106,6 +3627,7 @@ static void downloadSetupImage()
       Log_error_submit("Receiving failed. Read: %d", counter);
     }
 #endif // !BOARD_TRMNL_X    
+#endif // BOARD_M5STACK_PAPERCOLOR
     return true; });
 }
 
@@ -3349,7 +3871,16 @@ void goToSleep(void)
   pinMode(PIN_INTERRUPT, INPUT); // needed to not immediately wake up
   esp_deep_sleep_enable_gpio_wakeup(1 << PIN_INTERRUPT, ESP_GPIO_WAKEUP_GPIO_LOW);
 #elif defined(CONFIG_IDF_TARGET_ESP32S3)
+#ifdef BOARD_M5STACK_PAPERCOLOR
+  papercolor_configure_button_pins();
+  esp_err_t wake_err = esp_sleep_enable_ext1_wakeup(PAPER_COLOR_BUTTON_WAKE_MASK, ESP_EXT1_WAKEUP_ANY_LOW);
+  if (wake_err != ESP_OK)
+  {
+    Log_error("PaperColor button wakeup config failed: %d", wake_err);
+  }
+#else
   esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_INTERRUPT, 0);
+#endif
 #else
 #error "Unsupported ESP32 target for GPIO wakeup configuration"
 #endif
@@ -3375,7 +3906,12 @@ static void goToSleepButtonOnly(void)
 #elif defined( CONFIG_IDF_TARGET_ESP32C3 ) || defined ( CONFIG_IDF_TARGET_ESP32C5 )
   esp_deep_sleep_enable_gpio_wakeup(1 << PIN_INTERRUPT, ESP_GPIO_WAKEUP_GPIO_LOW);
 #elif CONFIG_IDF_TARGET_ESP32S3
+#ifdef BOARD_M5STACK_PAPERCOLOR
+  papercolor_configure_button_pins();
+  esp_sleep_enable_ext1_wakeup(PAPER_COLOR_BUTTON_WAKE_MASK, ESP_EXT1_WAKEUP_ANY_LOW);
+#else
   esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_INTERRUPT, 0);
+#endif
 #else
 #error "Unsupported ESP32 target for GPIO wakeup configuration"
 #endif
@@ -3554,6 +4090,8 @@ static float readBatteryVoltage(void)
     Log.error("%s [%d]: BQ27427 not initialized. Cannot read battery voltage.\r\n", __FILE__, __LINE__);
     return -1.0;
   }
+#elif defined(BOARD_M5STACK_PAPERCOLOR)
+  return papercolor_read_battery_voltage();
 #else
   #if defined(BOARD_XIAO_EPAPER_DISPLAY) || defined(BOARD_SEEED_RETERMINAL_E1001) || defined(BOARD_SEEED_RETERMINAL_E1002)
     pinMode(PIN_VBAT_SWITCH, OUTPUT);
@@ -3599,7 +4137,7 @@ bool submitLogString(const char *log_buffer)
   }
 
   LogApiInput input{api_key, log_buffer};
-  return submitLogToApi(input, preferences.getString(PREFERENCES_API_URL, API_BASE_URL).c_str());
+  return submitLogToApi(input, apiBaseUrlFromPreferences().c_str());
 }
 
 /**
@@ -3662,7 +4200,7 @@ static void submitStoredLogs(void)
     Log.info("%s [%d]: need to send the log\r\n", __FILE__, __LINE__);
 
     LogApiInput input{api_key, log.c_str()};
-    submitLogToApiResult = submitLogToApi(input, preferences.getString(PREFERENCES_API_URL, API_BASE_URL).c_str());
+    submitLogToApiResult = submitLogToApi(input, apiBaseUrlFromPreferences().c_str());
   }
   else
   {
@@ -3795,14 +4333,20 @@ void fixFileName(const char *src, char *dest)
 {
 int iLen;
 
+  if (!src || !dest) {
+    return;
+  }
+
   // SPIFFS only allows 32 bytes for the name, so if it's too long, fix it
   dest[0] = '/'; // SPIFFS requires files to start with the root dir
   iLen = strlen(src);
   if (iLen > 31) {
     memcpy(&dest[1], src, 7); // first 7 chars are "plugin-" or "mashup-"
-    strcpy(&dest[8], &src[iLen-17]); // get the prefix name and unique id plus timestamp (e.g. mashup-066cc3-1771674964)
+    memcpy(&dest[8], &src[iLen-17], 17); // get the prefix name and unique id plus timestamp (e.g. mashup-066cc3-1771674964)
+    dest[25] = '\0';
   } else {
     strncpy(&dest[1], src, 31); // use it as-is
+    dest[iLen + 1] = '\0';
   }
 } /* fixFileName() */
 
@@ -3818,7 +4362,20 @@ static bool checkCurrentFileName(String &newName)
 char szTemp[36];
 
   fixFileName(newName.c_str(), szTemp); // shorten the name (if needed) to fit the SPIFFS file length limit of 31 chars + 0 terminator
-  return filesystem_file_exists(szTemp);
+#ifdef BOARD_M5STACK_PAPERCOLOR
+  if (papercolor_button_action == PAPER_COLOR_BUTTON_REFRESH)
+  {
+    Log_info("PaperColor refresh requested; bypassing image cache");
+    return false;
+  }
+#endif
+
+  if (filesystem_file_exists(szTemp))
+  {
+    return true;
+  }
+
+  return false;
 } /* checkCurrentFileName() */
 
 static void wifiErrorDeepSleep()
@@ -3865,7 +4422,8 @@ DeviceStatusStamp getDeviceStatusStamp()
   DeviceStatusStamp deviceStatus = {};
 
   deviceStatus.wifi_rssi_level = WiFi.RSSI();
-  strncpy(deviceStatus.wifi_status, wifiStatusStr(WiFi.status()), sizeof(deviceStatus.wifi_status) - 1);
+  const char *wifi_status = wifiStatusStr(WiFi.status());
+  strncpy(deviceStatus.wifi_status, wifi_status ? wifi_status : "UNKNOWN", sizeof(deviceStatus.wifi_status) - 1);
   deviceStatus.refresh_rate = preferences.getUInt(PREFERENCES_SLEEP_TIME_KEY);
   deviceStatus.time_since_last_sleep = time_since_sleep;
   snprintf(deviceStatus.current_fw_version, sizeof(deviceStatus.current_fw_version), "%s", FW_VERSION_STRING);

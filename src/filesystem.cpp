@@ -2,13 +2,41 @@
 #include <Arduino.h>
 #include <trmnl_log.h>
 
-#if defined (BOARD_X_CLASS)
+#if defined(ARDUINO_ARCH_ESP32)
+#include "esp_heap_caps.h"
+#endif
+
+#if defined(BOARD_X_CLASS) || defined(BOARD_M5STACK_PAPERCOLOR)
 #include <LittleFS.h>
 #define FS LittleFS
 #else
 #include <SPIFFS.h>
 #define FS SPIFFS
 #endif
+
+static size_t filesystem_cache_identity_len(const char *path)
+{
+    if (!path)
+    {
+        return 0;
+    }
+
+    const char *underscore = strchr(path + 1, '_');
+    if (underscore)
+    {
+        return static_cast<size_t>(underscore - path + 1);
+    }
+
+    size_t len = strlen(path);
+    return len < 14 ? len : 14;
+}
+
+static bool filesystem_same_cache_identity(const char *a, const char *b)
+{
+    size_t a_len = filesystem_cache_identity_len(a);
+    size_t b_len = filesystem_cache_identity_len(b);
+    return a_len > 0 && a_len == b_len && strncmp(a, b, a_len) == 0;
+}
 
 /**
  * @brief Function to init the filesystem
@@ -141,18 +169,35 @@ bool bDel;
         }
 
         s = (char *)file.name();
-        // The last 10 characters of the name are the epoch timestamp
-        u32 = (uint32_t) atoi(&s[strlen(s)-10]);
+        size_t fileNameLen = strlen(s);
+        bool hasTimestamp = false;
+        u32 = 0;
+        if (fileNameLen >= 10)
+        {
+            const char *timestamp = &s[fileNameLen - 10];
+            hasTimestamp = true;
+            for (size_t i = 0; i < 10; ++i)
+            {
+                if (timestamp[i] < '0' || timestamp[i] > '9')
+                {
+                    hasTimestamp = false;
+                    break;
+                }
+            }
+            if (hasTimestamp)
+            {
+                u32 = (uint32_t)atoi(timestamp);
+            }
+        }
         bDel = false;
 
-        strcpy(szTemp, "/"); // needed on this file operation
-        strcat(szTemp, file.name());
+        snprintf(szTemp, sizeof(szTemp), "/%s", file.name());
 
         Log_info("Comparing name %s with %s, timestamp %u, current time %u", name, file.name(), u32, (uint32_t)tt);
-        if (memcmp(name, szTemp, 14) == 0) { // older version of the same file
+        if (strcmp(name, szTemp) != 0 && filesystem_same_cache_identity(name, szTemp)) { // older version of the same file
             Log_info("Deleting older version of plugin image %s - %s", name, file.name());
             bDel = true;
-        } else if ((uint32_t)tt - u32 > 60*60*24) { // More than 24h old
+        } else if (hasTimestamp && (uint32_t)tt > u32 && (uint32_t)tt - u32 > 60*60*24) { // More than 24h old
             Log_info("Deleting image older than 24h - %s", file.name());
             bDel = true;
         }
@@ -175,6 +220,12 @@ bool bDel;
  */
 size_t filesystem_write_to_file(const char *name, uint8_t *in_buffer, size_t size)
 {
+    if (!name || !in_buffer || size == 0)
+    {
+        Log_error("Invalid file write request");
+        return 0;
+    }
+
     uint32_t FS_freeBytes = (FS.totalBytes() - FS.usedBytes());
     Log_info("FS free space - %d, total -%d", FS_freeBytes, FS.totalBytes());
     if (FS.exists(name))
@@ -193,17 +244,37 @@ size_t filesystem_write_to_file(const char *name, uint8_t *in_buffer, size_t siz
     File file = FS.open(name, FILE_WRITE, true);
     if (file)
     {
+#if defined(ARDUINO_ARCH_ESP32)
+        constexpr size_t WRITE_CHUNK_SIZE = 4096;
+        uint8_t *writeBuffer = static_cast<uint8_t *>(heap_caps_malloc(WRITE_CHUNK_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        if (!writeBuffer)
+        {
+            Log_error("Failed to allocate internal FS write buffer");
+            file.close();
+            return 0;
+        }
+#else
+        constexpr size_t WRITE_CHUNK_SIZE = 4096;
+#endif
         // Write the buffer in chunks
         size_t bytesWritten = 0;
         while (bytesWritten < size)
         {
 
             size_t diff = size - bytesWritten;
-            size_t chunkSize = _min(4096, diff);
-            uint16_t res = file.write(in_buffer + bytesWritten, chunkSize);
+            size_t chunkSize = _min(WRITE_CHUNK_SIZE, diff);
+#if defined(ARDUINO_ARCH_ESP32)
+            memcpy(writeBuffer, in_buffer + bytesWritten, chunkSize);
+            size_t res = file.write(writeBuffer, chunkSize);
+#else
+            size_t res = file.write(in_buffer + bytesWritten, chunkSize);
+#endif
             if (res != chunkSize)
             {
                 file.close();
+#if defined(ARDUINO_ARCH_ESP32)
+                free(writeBuffer);
+#endif
 
                 Log_info("Erasing FS...");
                 if (FS.format())
@@ -218,7 +289,11 @@ size_t filesystem_write_to_file(const char *name, uint8_t *in_buffer, size_t siz
                 return bytesWritten;
             }
             bytesWritten += chunkSize;
+            yield();
         }
+#if defined(ARDUINO_ARCH_ESP32)
+        free(writeBuffer);
+#endif
         Log_info("file %s writing success - %d bytes", name, bytesWritten);
         file.close();
         return bytesWritten;

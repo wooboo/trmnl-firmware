@@ -46,7 +46,7 @@
 
 #define DISPLAY_BMP_IMAGE_SIZE 48062 // in bytes - 62 bytes - header; 48000 bytes - bitmap (480*800 1bpp) / 8
 #define DEFAULT_IMAGE_SIZE 48000
-#if defined(BOARD_TRMNL_X) || defined(BOARD_TRMNL_X_EPDIY)
+#if defined(BOARD_TRMNL_X) || defined(BOARD_TRMNL_X_EPDIY) || defined(BOARD_M5STACK_PAPERCOLOR)
 #define MAX_IMAGE_SIZE 1572864 // 1.5MB, enough for 1872x1404 4-bit BMP (16 grayscale)
 #else
 #define MAX_IMAGE_SIZE 90000 // largest compressed image we can receive
@@ -114,6 +114,12 @@ enum WIFI_CONNECT_RETRY_TIME // Time to sleep before trying to connect to the Wi
 #define PIN_INTERRUPT 0
 #define FAKE_BATTERY_VOLTAGE
 #define DEVICE_MODEL "PaperS3"
+#elif defined(BOARD_M5STACK_PAPERCOLOR)
+#define PIN_INTERRUPT 10
+#define PAPER_COLOR_BUTTON_C_PIN 1
+#define PAPER_COLOR_BUTTON_B_PIN 9
+#define PAPER_COLOR_BUTTON_A_PIN 10
+#define DEVICE_MODEL "M5Stack PaperColor"
 #elif defined(BOARD_ESP32_C5_DEVKITC_1)
 #define PIN_INTERRUPT 28
 #define DEVICE_MODEL "gen-2"

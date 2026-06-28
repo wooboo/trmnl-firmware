@@ -10,5 +10,6 @@
 .vscode/settings.json
 sdkconfig.*
 !sdkconfig.defaults
+!sdkconfig.m5stack_papercolor
 managed_components/
 test/integration/test_config.h

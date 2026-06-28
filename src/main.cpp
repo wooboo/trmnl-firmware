@@ -71,11 +71,12 @@ void setup()
 #else // TRMNL OG setup()
 void setup()
 {
-  
+#ifndef NO_QA
   bool testPassed = checkIfAlreadyPassed();
   if (!testPassed) {
     startQA();
   }
+#endif // NO_QA
   esp_ota_mark_app_valid_cancel_rollback();
   bl_init();
 }

@@ -12,6 +12,11 @@ extern FASTEPD bbep;
 #define BQ25616_STAT_PIN 2 // P0_2 — LOW = charging in progress
 #endif // BOARD_TRMNL_X
 
+#ifdef BOARD_M5STACK_PAPERCOLOR
+extern UsbStatus papercolor_get_usb_status(void);
+extern ChargingStatus papercolor_get_charging_status(void);
+#endif
+
 UsbStatus get_usb_status(void)
 {
 #if defined(BOARD_TRMNL_X)
@@ -21,6 +26,8 @@ UsbStatus get_usb_status(void)
   // BQ25616 PG wired to a dedicated C5 GPIO; open-drain, LOW = VBUS present.
   pinMode(BQ25616_PG_PIN, INPUT);
   return (digitalRead(BQ25616_PG_PIN) == 0) ? UsbStatus::CONNECTED : UsbStatus::DISCONNECTED;
+#elif defined(BOARD_M5STACK_PAPERCOLOR)
+  return papercolor_get_usb_status();
 #else
   return UsbStatus::UNKNOWN;
 #endif
@@ -36,6 +43,8 @@ ChargingStatus get_charging_status(void)
 #elif defined(BOARD_TRMNL_GEN2)
   pinMode(BQ25616_STAT_PIN, INPUT);
   return (digitalRead(BQ25616_STAT_PIN) == 0) ? ChargingStatus::CHARGING : ChargingStatus::NOT_CHARGING;
+#elif defined(BOARD_M5STACK_PAPERCOLOR)
+  return papercolor_get_charging_status();
 #else
   return ChargingStatus::UNKNOWN;
 #endif
